@@ -1,0 +1,106 @@
+:root {
+    --bg-border: #553d20;
+    --bg: #eeb161;
+    --bar: #bd8d4e;
+    --title-text: var(--bg-border);
+}
+
+body {
+    background-color: var(--bg-border);
+    margin: 0;
+    padding: 0 10px 0 10px;
+    font-family: sans-serif;
+}
+
+.content {
+    background-color: var(--bg);
+    padding: 1%;
+    max-width: 800px;
+    margin: 10px auto 10px auto;
+    margin-left: max(10px, auto);
+
+}
+
+.header {
+    background-color: var(--bar);
+    margin: 0;
+    border-radius: 10px;
+    padding: 5px;
+    text-align: center;
+    color: var(--title-text);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+h1 {
+    margin: 0 auto 0 auto;
+    text-align: center;
+    padding: 0;
+}
+
+.button-settings {
+    display: flex;
+    float: right;
+    margin: 5px;
+    padding: 5px;
+    background-color: var(--bar);
+    border: none;
+    border-radius: 5px;
+}
+
+.button-settings:hover {
+    background-color: var(--bg);
+}
+
+.button-settings:active {
+    background-color: var(--title-text);
+}
+
+.button-settings svg {
+    fill: var(--title-text);
+    width: 20px;
+    height: 20px;
+    margin: 2px;
+    padding: 2px;
+}
+
+.button-settings:active svg {
+    fill: var(--bar);
+    width: 28px;
+    height: 28px;
+    margin: 0;
+    padding: 0;
+}
+
+.popup {
+    background: rgb(222, 222, 222);
+    visibility: hidden;
+    display: none;
+    padding: 20px;
+    margin: 0 20px 20px 20px;
+}
+
+.popup.show {
+    visibility: visible;
+    display: block;
+}
+
+.request {
+    background-color: var(--bar);
+    border-radius: 5px;
+    padding: 5px;
+    margin: 5px;
+    margin-right: 40px;
+    display: inline-flex;
+
+}
+
+.response {
+    background-color: var(--bar);
+    border-radius: 5px;
+    padding: 5px;
+    margin: 5px;
+    margin-left: 40px;
+    display: inline-flex;
+}
