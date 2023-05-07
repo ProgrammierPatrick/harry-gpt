@@ -26,9 +26,9 @@
       <h5>Settings</h5>
       <label for="select-model">Model:</label>
       <select name="model" id="select-model">
-        <option value="lstm-8">LSTM-8</option>
-        <option value="lstm-full">LSTM-Full</option>
-        <option value="gan-1">GAN1</option>
+        {% for model in model_names %}
+        <option value="{{model}}">{{model}}</option>
+        {% endfor %}
       </select>
       <table>
         <tr>
@@ -82,6 +82,8 @@
       </div>
     </div>
   </div>
+
+  <script>function getModelsJson() { return {{models_json}}; }</script>
 </body>
 
 </html>
