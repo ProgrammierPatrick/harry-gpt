@@ -26,8 +26,8 @@
       <h5>Settings</h5>
       <label for="select-model">Model:</label>
       <select name="model" id="select-model">
-        {% for model in model_names %}
-        <option value="{{model}}">{{model}}</option>
+        {% for model, loss in model_data.items() %}
+        <option value="{{model}}">{{model}} (loss: {{'%0.3f' % loss}})</option>
         {% endfor %}
       </select>
       <table>

@@ -6,7 +6,8 @@ import torch.optim as optim
 import torch.nn.utils.rnn as rnn
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from typing import Dict, Tuple, Union
+from typing import Dict, Iterator, List, Tuple, Union
+from torch import Tensor
 import os, time, datetime
 
 LANGUAGE = "de"
@@ -14,20 +15,17 @@ LANGUAGE = "de"
 TRAIN_DATA_FILE = f"../data/HP1-7_{LANGUAGE}.txt"
 OUTPUT_FOLDER = "result"
 
-# EMBED_FEATURES  = 16
-EMBED_FEATURES  = 64
-# HIDDEN_FEATURES = 512
-HIDDEN_FEATURES = 128
-# NUM_LAYERS = 4
-NUM_LAYERS = 1
+EMBED_FEATURES  = 32
+HIDDEN_FEATURES = 256
+NUM_LAYERS = 2
+DROPOUT = 0.1
+TEMPERATURE = 0.7
 
-# BATCH_SIZE = 4
-BATCH_SIZE = 16
-# SEQUENCE_LENGTH = 2048
-SEQUENCE_LENGTH = 1024
-LEARNING_RATE = 0.002
+BATCH_SIZE = 128
+SEQUENCE_LENGTH = 512
+LEARNING_RATE = 0.005
 LEARNING_BETA = (0.7, 0.999)
-NUM_EPOCHS = 1
+NUM_EPOCHS = 2
 
 MODEL_NAME = f"lstm-{NUM_LAYERS}-{HIDDEN_FEATURES}-{LANGUAGE}"
 
@@ -47,7 +45,7 @@ data_ix = torch.tensor(data_ix).cuda()
 print('done.')
 
 class Model(nn.Module):
-    def __init__(self, vocab_size, embed_features, hidden_features, num_layers, char_to_ix, ix_to_char):
+    def __init__(self, vocab_size, embed_features, hidden_features, num_layers, temperature, char_to_ix, ix_to_char):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_features = embed_features
@@ -55,6 +53,7 @@ class Model(nn.Module):
         self.num_layers = num_layers
         self.char_to_ix = char_to_ix
         self.ix_to_char = ix_to_char
+        self.temperature = TEMPERATURE
 
         self.info_name: str = MODEL_NAME
         self.info_epochs: float = 0.0
@@ -65,11 +64,11 @@ class Model(nn.Module):
         self.is_snapshot: bool = True
 
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_features)
-        self.lstm = nn.LSTM(input_size=embed_features, hidden_size=hidden_features, num_layers=NUM_LAYERS, batch_first=True, dropout=0.2)
+        self.lstm = nn.LSTM(input_size=embed_features, hidden_size=hidden_features, num_layers=NUM_LAYERS, batch_first=True, dropout=DROPOUT)
         self.out_embed = nn.Linear(hidden_features, vocab_size)
 
     # input: (batch, seq_len)
-    def forward(self, input: torch.Tensor, memory: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, input: Tensor, memory: Tuple[Tensor,Tensor]) -> Tuple[Tensor, Tuple[Tensor,Tensor]]:
         batch_size = input.size(0)
         embedded = self.embedding(input)
         # embedded: (batch, seq_len, embed_features)
@@ -84,41 +83,63 @@ class Model(nn.Module):
         output_embed = self.out_embed(hidden)
         # output_embed: (batch, seq_len, vocab_size)
         return output_embed, (hn.detach(), cn.detach())
-    
-def generate(model: nn.Module, device: str, length: int, prompt: str = "") -> str:
-    memory = None
-    if len(prompt) == 0:
-        value = torch.randint(0, model.vocab_size - 1, (1,1), device=device)
-        # value: (batch=1,seq_len=1)
-    else:
-        prompt_ix = list(map(lambda c: model.char_to_ix[c], prompt))
-        # prompt_ix: list(seq_len=len(prompt),)
-        value, memory = model(torch.tensor(prompt_ix, device=device).view(1, -1), memory)
-        # value: (batch=1, seq_len=len(prompt), vocab_size)
-        value = F.softmax(value[:,-1].ravel(), dim=-1)
+
+    @torch.jit.export
+    def generate_start(self, prompt: str = "") -> Tuple[str, List[Tensor]]:
+        device = self.out_embed.weight.device
+
+        hn = torch.zeros(self.num_layers, 1, self.hidden_features, device=device)
+        cn = torch.zeros(self.num_layers, 1, self.hidden_features, device=device)
+
+        prompt_ix: List[int] = []
+        for c in prompt: prompt_ix.append(self.char_to_ix[c])
+        # prompt_ix: List(seq_len=len(prompt),)
+
+        value, (hn, cn) = self(torch.tensor(prompt_ix, device=device).view(1, -1), (hn, cn))
+        # value: (1, len(prompt), vocab_size)
+        value = F.softmax(value[:,-1].ravel() / self.temperature, dim=-1)
         # value: (vocab_size,)
-        value = torch.multinomial(value.ravel(), 1)
+        value = torch.multinomial(value, num_samples=1)
         # value: (1,)
-        value = value.view(1, 1)
-        # value: (batch=1, seq_len=1)
-    text = []
-    for _ in range(length):
-        value, memory = model(value, memory)
-        # value: (batch=1, seq_len=1, vocab_size)
-        value = F.softmax(value, dim=-1)
-        # value: (batch=1, seq_len=1, vocab_size)
-        value = torch.multinomial(value.ravel(), 1)
+
+        c = self.ix_to_char[int(value)]
+        return c, [value, hn, cn]
+
+    @torch.jit.export
+    def generate_step(self, context: List[Tensor]) -> Tuple[str, List[Tensor]]:
+        value, hn, cn = context
+
+        value, (hn, cn) = self(value.view(1, -1), (hn, cn))
+        # value: (1, 1, vocab_size)
+        value = F.softmax(value[:,-1].ravel() / self.temperature, dim=-1)
+        # value: (vocab_size,)
+        value = torch.multinomial(value, num_samples=1)
         # value: (1,)
-        value = value.view(1, 1)
-        # value: (batch=1, seq_len=1)
-        text.append(ix_to_char[int(value)])
-    return ''.join(text)
+
+        c = self.ix_to_char[int(value)]
+        return c, [value, hn, cn]
+
+
+def generate_it(model: nn.Module, length: int, prompt: str = "") -> Iterator[str]:
+    if prompt == "":
+        prompt = model.ix_to_char[torch.randint(low=0, high=model.vocab_size, size=(1,)).item()]
+    char, context = model.generate_start(prompt)
+    yield char
+    for _ in range(length - 1):
+        char, context = model.generate_step(context)
+        yield char
+
+def generate(model: nn.Module, length: int, prompt: str = "") -> str:
+    return "".join(generate_it(model=model, length=length, prompt=prompt))
+
+
 
 model = Model(vocab_size=vocab_size, embed_features=EMBED_FEATURES,
-              hidden_features=HIDDEN_FEATURES, num_layers=NUM_LAYERS, char_to_ix=char_to_ix, ix_to_char=ix_to_char)
+              hidden_features=HIDDEN_FEATURES, num_layers=NUM_LAYERS, temperature=TEMPERATURE, char_to_ix=char_to_ix, ix_to_char=ix_to_char)
 model.cuda()
 loss_func = nn.CrossEntropyLoss().cuda()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA)
+
 
 fig, ax = plt.subplots(1,1)
 loss_graph = []
@@ -152,12 +173,12 @@ def save_model(is_snapshot: bool = False, trained_epochs: float = 0):
     model.info_time = time.time() - start_time
     model.info_loss = avg_loss
     model.info_is_snapshot = is_snapshot
-    
+
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
     scripted_model = torch.jit.script(model)
     scripted_model.save(os.path.join(OUTPUT_FOLDER, name + ".pt"))
-    
+
     plt.savefig(os.path.join(OUTPUT_FOLDER, name + ".png"))
     print("model saved.")
 
@@ -173,18 +194,21 @@ class Timer:
 
 plot_timer = Timer(interval_in_s=1)
 generate_timer = Timer(interval_in_s=30)
-# snapshot_timer = Timer(interval_in_s=5*60)
-snapshot_timer = Timer(interval_in_s=10)
+snapshot_timer = Timer(interval_in_s=60)
 
 for epoch_idx in range(NUM_EPOCHS):
     epoch_memory = None
-    epoch_offset = torch.randint(0,SEQUENCE_LENGTH-1, (BATCH_SIZE,)) # BATCH_SIZE offsets
+    # epoch_offset = torch.randint(0,SEQUENCE_LENGTH-1, (BATCH_SIZE,)) # BATCH_SIZE offsets
     for batch_idx in range((data_size // SEQUENCE_LENGTH) - 1):
         this_batch_time = time.time()
 
-        indices_expanded = epoch_offset[:, None].expand(-1, SEQUENCE_LENGTH + 1)
-        offsets = torch.arange(SEQUENCE_LENGTH + 1).expand(epoch_offset.size(0), -1)
-        indices_2d = indices_expanded + offsets + batch_idx * SEQUENCE_LENGTH
+        epoch_memory = None
+        offset = torch.randint(0, data_size - SEQUENCE_LENGTH - 1, (BATCH_SIZE,))
+
+        # indices_expanded = epoch_offset[:, None].expand(-1, SEQUENCE_LENGTH + 1)
+        indices_expanded = offset[:, None].expand(-1, SEQUENCE_LENGTH + 1)
+        offsets = torch.arange(SEQUENCE_LENGTH + 1).expand(offset.size(0), -1)
+        indices_2d = indices_expanded + offsets
         data_slice = data_ix[indices_2d]
         data_input_slice = data_slice[:,:-1].contiguous()
         data_output_slice = data_slice[:,1:].contiguous()
@@ -193,8 +217,10 @@ for epoch_idx in range(NUM_EPOCHS):
         # GENERATE TEXT
         if generate_timer.check(this_batch_time):
             print (f"batch {batch_idx}/{data_size // SEQUENCE_LENGTH}")
-            txt = generate(model, 'cuda', 2000)
-            print (f'----\n {txt} \n----')
+            print("----")
+            print(generate(model=model, length=2000))
+            print("----")
+
 
         result, epoch_memory = model.forward(data_input_slice, epoch_memory)
         target = F.one_hot(data_output_slice, num_classes=vocab_size).float()
@@ -218,11 +244,11 @@ for epoch_idx in range(NUM_EPOCHS):
 
 print("TRAINING COMPLETED!!!")
 print("GENERATE NAME...")
-book_name = f"Harry Potter and {generate(model, 'cuda', 100, 'Harry Potter and ')}"
+book_name = f"Harry Potter and {generate(model=model, length=100, prompt='Harry Potter and ')}"
 print(book_name)
 
 print ("GENERATE TEXT...")
-book_text = generate(model, 'cuda', 10_000)
+book_text = generate(model=model, length=10_000)
 print(book_text)
 
 # torch.save(model.state_dict(), 'hp_gan.pt')
