@@ -18,17 +18,19 @@ OUTPUT_FOLDER = "result"
 
 EMBED_FEATURES  = 32
 HIDDEN_FEATURES = 256
-NUM_LAYERS = 2
-DROPOUT = 0.1
+NUM_LAYERS = 6
+DROPOUT = 0.0
 TEMPERATURE = 0.7
 
 BATCH_SIZE = 128
-SEQUENCE_LENGTH = 512
-LEARNING_RATE = 0.005
+SEQUENCE_LENGTH = 512 # 128
+LEARNING_RATE = 0.001
 LEARNING_BETA = (0.7, 0.999)
-NUM_EPOCHS = 2
+WEIGHT_DECAY = 0.01
+GRADIENT_CLIP = 5.0
+NUM_EPOCHS = 1
 
-MODEL_NAME = f"lstm-{NUM_LAYERS}-{HIDDEN_FEATURES}-{LANGUAGE}"
+MODEL_NAME = f"gru-res-{NUM_LAYERS}-{HIDDEN_FEATURES}-{LANGUAGE}"
 
 data = open(TRAIN_DATA_FILE, 'r').read() # should be simple plain text file
 chars = list(set(data))
@@ -42,8 +44,41 @@ print("ix_to_char:", ix_to_char)
 
 data_ix = list(map(lambda c: char_to_ix[c], data))
 print('upload training data...')
-data_ix = torch.tensor(data_ix).cuda()
+data_ix = torch.tensor(data_ix, dtype=torch.long).cuda()
 print('done.')
+
+class ResidualGruBlock(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int):
+        super().__init__()
+        self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size, batch_first=True)
+        self.lin = nn.Sequential(
+            nn.Linear(hidden_size, 2 * hidden_size),
+            nn.GELU(),
+            nn.Linear(2 * hidden_size, hidden_size))
+    
+    def forward(self, x: Tensor, h: Tensor) -> Tuple[Tensor, Tensor]:
+        val, h = self.gru(x, h)
+        val = self.lin(val)
+        return x + val, h
+
+class ResidualGruStack(nn.Module):
+    def __init__(self, num_layers: int, input_size: int, hidden_features: int, dropout: float = 0.0):
+        super().__init__()
+        self.first_gru = nn.GRU(input_size=input_size, hidden_size=hidden_features, batch_first=True)
+        self.first_lin = nn.Sequential(
+            nn.Linear(hidden_features, 2 * hidden_features),
+            nn.GELU(),
+            nn.Linear(2 * hidden_features, hidden_features))
+        self.other_grus = nn.ModuleList([ResidualGruBlock(input_size=hidden_features, hidden_size=hidden_features) for _ in range(num_layers - 1)])
+
+    def forward(self, x: Tensor, h: Tensor) -> Tuple[Tensor, Tensor]:
+        x, h_1 = self.first_gru(x, h[:1])
+        x = self.first_lin(x)
+        hs: List[Tensor] = [h_1]
+        for i, g in enumerate(self.other_grus):
+            x, hi = g(x, h[i+1:i+2])
+            hs.append(hi)
+        return x, torch.cat(hs)
 
 class Model(nn.Module):
     def __init__(self, vocab_size, embed_features, hidden_features, num_layers, temperature, char_to_ix, ix_to_char):
@@ -54,7 +89,7 @@ class Model(nn.Module):
         self.num_layers = num_layers
         self.char_to_ix = char_to_ix
         self.ix_to_char = ix_to_char
-        self.temperature = TEMPERATURE
+        self.temperature = temperature
 
         self.info_name: str = MODEL_NAME
         self.info_epochs: float = 0.0
@@ -65,38 +100,34 @@ class Model(nn.Module):
         self.is_snapshot: bool = True
 
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_features)
-        self.lstm = nn.LSTM(input_size=embed_features, hidden_size=hidden_features, num_layers=NUM_LAYERS, batch_first=True, dropout=DROPOUT)
+        self.gru = ResidualGruStack(num_layers=num_layers, input_size=embed_features, hidden_features=hidden_features, dropout=DROPOUT)
         self.out_embed = nn.Linear(hidden_features, vocab_size)
 
     # input: (batch, seq_len)
-    def forward(self, input: Tensor, memory: Tuple[Tensor,Tensor]) -> Tuple[Tensor, Tuple[Tensor,Tensor]]:
-        batch_size = input.size(0)
+    def forward(self, input: Tensor, memory: Tensor) -> Tuple[Tensor, Tensor]:
         embedded = self.embedding(input)
         # embedded: (batch, seq_len, embed_features)
         if memory is None:
-            memory = (
-                torch.zeros(self.num_layers, input.size(0), self.hidden_features, device=input.device),
-                torch.zeros(self.num_layers, input.size(0), self.hidden_features, device=input.device)
-            )
-        hidden, (hn, cn) = self.lstm(embedded, memory)
+            memory = torch.zeros(self.num_layers, input.size(0), self.hidden_features, device=input.device)
+        hidden, hn = self.gru(embedded, memory)
+
         # hidden: (batch, seq_len, hidden_features)
         # hn, cn: (seq_len, batch, hidden_features)
         output_embed = self.out_embed(hidden)
         # output_embed: (batch, seq_len, vocab_size)
-        return output_embed, (hn.detach(), cn.detach())
+        return output_embed, hn.detach()
 
     @torch.jit.export
     def generate_start(self, prompt: str = "") -> Tuple[str, List[Tensor]]:
         device = self.out_embed.weight.device
 
         hn = torch.zeros(self.num_layers, 1, self.hidden_features, device=device)
-        cn = torch.zeros(self.num_layers, 1, self.hidden_features, device=device)
 
         prompt_ix: List[int] = []
         for c in prompt: prompt_ix.append(self.char_to_ix[c])
         # prompt_ix: List(seq_len=len(prompt),)
 
-        value, (hn, cn) = self(torch.tensor(prompt_ix, device=device).view(1, -1), (hn, cn))
+        value, hn = self(torch.tensor(prompt_ix, device=device).view(1, -1), hn)
         # value: (1, len(prompt), vocab_size)
         value = F.softmax(value[:,-1].ravel() / self.temperature, dim=-1)
         # value: (vocab_size,)
@@ -104,13 +135,13 @@ class Model(nn.Module):
         # value: (1,)
 
         c = self.ix_to_char[int(value)]
-        return c, [value, hn, cn]
+        return c, [value, hn]
 
     @torch.jit.export
     def generate_step(self, context: List[Tensor]) -> Tuple[str, List[Tensor]]:
-        value, hn, cn = context
+        value, hn = context
 
-        value, (hn, cn) = self(value.view(1, -1), (hn, cn))
+        value, hn = self(value.view(1, -1), hn)
         # value: (1, 1, vocab_size)
         value = F.softmax(value[:,-1].ravel() / self.temperature, dim=-1)
         # value: (vocab_size,)
@@ -118,7 +149,7 @@ class Model(nn.Module):
         # value: (1,)
 
         c = self.ix_to_char[int(value)]
-        return c, [value, hn, cn]
+        return c, [value, hn]
 
 
 def generate_it(model: nn.Module, length: int, prompt: str = "") -> Iterator[str]:
@@ -136,10 +167,13 @@ def generate(model: nn.Module, length: int, prompt: str = "") -> str:
 
 
 model = Model(vocab_size=vocab_size, embed_features=EMBED_FEATURES,
-              hidden_features=HIDDEN_FEATURES, num_layers=NUM_LAYERS, temperature=TEMPERATURE, char_to_ix=char_to_ix, ix_to_char=ix_to_char)
+              hidden_features=HIDDEN_FEATURES, num_layers=NUM_LAYERS,
+              temperature=TEMPERATURE, char_to_ix=char_to_ix, ix_to_char=ix_to_char)
 model.cuda()
 loss_func = nn.CrossEntropyLoss().cuda()
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA)
+# optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA, weight_decay=WEIGHT_DECAY)
+optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA, weight_decay=WEIGHT_DECAY)
+# optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=LEARNING_BETA[0])
 
 
 fig, ax = plt.subplots(1,1)
@@ -155,6 +189,7 @@ def update_plot():
     ax.set_title(f"Model '{MODEL_NAME}': Cross Entropy Loss")
     ax.set_xlabel("Epochs")
     ax.set_ylabel("Loss")
+    ax.set_ylim(top=4 if loss_graph[-1] > 1 else 2)
     ax.set_ylim(bottom=0)
     ax.grid('on')
     fig.canvas.draw_idle()
@@ -197,6 +232,9 @@ plot_timer = Timer(interval_in_s=1)
 generate_timer = Timer(interval_in_s=30)
 snapshot_timer = Timer(interval_in_s=60)
 
+min_norm = 1e10
+last_norm = 0
+
 for epoch_idx in range(NUM_EPOCHS):
     epoch_memory = None
     # epoch_offset = torch.randint(0,SEQUENCE_LENGTH-1, (BATCH_SIZE,)) # BATCH_SIZE offsets
@@ -219,8 +257,9 @@ for epoch_idx in range(NUM_EPOCHS):
         if generate_timer.check(this_batch_time):
             print (f"batch {batch_idx}/{data_size // SEQUENCE_LENGTH}")
             print("----")
-            print(generate(model=model, length=2000))
-            print("----")
+            for c in generate_it(model=model, length=2000):
+                print(c, end="")
+            print("\n----")
 
 
         result, epoch_memory = model.forward(data_input_slice, epoch_memory)
@@ -229,6 +268,14 @@ for epoch_idx in range(NUM_EPOCHS):
 
         optimizer.zero_grad()
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP)
+        
+        min_norm = min(min_norm, norm)
+        last_norm = norm
+        if norm > GRADIENT_CLIP and min_norm < GRADIENT_CLIP / 2:
+            # TODO: unify this with optimizer constructor
+            optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA, weight_decay=WEIGHT_DECAY)
+            print("reset optimizer")
         optimizer.step()
 
         loss_graph.append(float(loss))
@@ -237,7 +284,7 @@ for epoch_idx in range(NUM_EPOCHS):
 
         # PLOT LOSS
         if plot_timer.check(this_batch_time):
-            print(f"epoch {epoch_idx} / {NUM_EPOCHS} batch {batch_idx} / {(data_size - 1) // SEQUENCE_LENGTH}: loss: {loss}")
+            print(f"epoch {epoch_idx} / {NUM_EPOCHS} batch {batch_idx} / {(data_size - 1) // SEQUENCE_LENGTH}: loss: {loss} grad: {norm}")
             update_plot()
 
         if snapshot_timer.check(this_batch_time):
