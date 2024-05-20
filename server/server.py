@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from flask import Flask, render_template, request, Response, session, copy_current_request_context
+from flask import Flask, render_template, request, Response, session, copy_current_request_context, send_from_directory
 import urllib.parse
 import torch
 import torch.nn as nn
@@ -41,11 +41,11 @@ for model_filename in os.listdir("models"):
         "loss": model.info_loss,
         "batch_size": model.info_batch_size,
         "is_snapshot": model.info_is_snapshot,
+        "img_url": f"/img/{model_name}.png"
     }
     models[model_name] = {"model": model, "layers": layers}
 
-# model = list(models.values())[0]["model"]
-model = models["lstm-2-256-de"]["model"]
+model = models["gru-res-6-256-de"]["model"]
 
 active_generators = {}
 
@@ -100,24 +100,14 @@ def ajax_send_chat():
 
     return '', 204
 
-
+@app.route("/img/<filename>.png")
+def img_static(filename):
+    return send_from_directory(f"{app.root_path}/models/", f"{filename}.png")
 
 @app.route('/')
 def index():
     session_uuid = str(uuid.uuid4())
-    print("generated uuid in index.html:", session_uuid)
     session['uuid'] = session_uuid
-
-    # model_code = model.code.replace("\n", "<br>  ")
-
-    # model_text = ""
-    # for name, model in models.items():
-    #     model_text += f"<p> <h3>{name}</h5>"
-    #     model_text += "<ul>"
-    #     for layer in model["layers"]:
-    #         model_text += f"<li>{str(layer)}</li>"
-    #     model_text += "</ul></p>"
-    # model_code = model_text
 
     model_data = {}
     for value in models_json_data.values():
@@ -125,4 +115,5 @@ def index():
 
     return render_template('index.html.j2', models_json=json.dumps(models_json_data), model_data=model_data)
 
-app.run(debug=True)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", debug=True)

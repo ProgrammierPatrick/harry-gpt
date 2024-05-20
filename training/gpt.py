@@ -16,16 +16,17 @@ LANGUAGE = "de"
 TRAIN_DATA_FILE = f"../data/HP1-7_{LANGUAGE}.txt"
 OUTPUT_FOLDER = "result"
 
+NUM_LAYERS = 1
 EMBED_FEATURES  = 16
-HIDDEN_FEATURES = 16
-NHEAD = 8
+HIDDEN_FEATURES = 64
+NHEAD = 2
 TEMPERATURE = 0.7
 
-BATCH_SIZE = 4
-SEQUENCE_LENGTH = 512
-LEARNING_RATE = 0.005
-LEARNING_BETA = (0.7, 0.999)
-NUM_EPOCHS = 2
+BATCH_SIZE = 64
+SEQUENCE_LENGTH = 128 # 512
+LEARNING_RATE = 0.1
+LEARNING_BETA = (0.8, 0.999)
+NUM_EPOCHS = 4
 
 MODEL_NAME = f"gpt-{HIDDEN_FEATURES}-{LANGUAGE}"
 
@@ -63,14 +64,26 @@ class PositionalEncoding(nn.Module):
     # x (batch_size, seq_len, d_model)
     x = x + self.pe[:x.size(1)]
     return self.dropout(x)
+  
+class LearnablePosEnc(nn.Module):
+    def __init__(self, d_model: int, max_len: int=5000, dropout: float=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.embedding = nn.Embedding(num_embeddings=max_len, embedding_dim=d_model)
+    def forward(self, x):
+        # x (batch_size, seq_len, d_model)
+        seq_len = x.size(1)
+        x = x + self.embedding(torch.arange(seq_len, device=x.device))
+        return self.dropout(x)
 
 class Model(nn.Module):
-    def __init__(self, vocab_size, sequence_length, hidden_features, nhead, temperature, char_to_ix, ix_to_char):
+    def __init__(self, vocab_size, sequence_length, hidden_features, nhead, num_layers, temperature, char_to_ix, ix_to_char):
         super().__init__()
         self.vocab_size = vocab_size
         self.sequence_length = sequence_length
         self.hidden_features = hidden_features
         self.nhead = nhead
+        self.num_layers = num_layers
         self.temperature = temperature
         self.char_to_ix = char_to_ix
         self.ix_to_char = ix_to_char
@@ -84,9 +97,11 @@ class Model(nn.Module):
         self.is_snapshot: bool = True
 
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=hidden_features)
-        self.pos_encoder = PositionalEncoding(d_model=hidden_features, max_len=sequence_length, dropout=0.1)
+        # self.pos_encoder = PositionalEncoding(d_model=hidden_features, max_len=sequence_length, dropout=0.1)
+        self.pos_encoder = LearnablePosEnc(d_model=hidden_features, max_len=sequence_length, dropout=0.1)
 
-        self.transformer = nn.TransformerEncoderLayer(d_model=hidden_features, nhead=nhead,dim_feedforward=2*hidden_features, batch_first=True)
+        self.transformer_layer = nn.TransformerEncoderLayer(d_model=hidden_features, nhead=nhead, dim_feedforward=2*hidden_features, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer=self.transformer_layer, num_layers=self.num_layers)
         src_mask = nn.Transformer.generate_square_subsequent_mask(sequence_length)
         self.register_buffer('src_mask', src_mask)
 
@@ -111,7 +126,8 @@ class Model(nn.Module):
         value = torch.cat((torch.zeros(batch_size, 1, self.hidden_features, device=input.device), value[:, :-1]), dim=1)
         # value: (batch, max_seq_len, hidden_features)
 
-        value = self.transformer(src=value, src_mask=self.src_mask)
+        value = self.transformer(src=value, mask=self.src_mask)
+
         # value: (batch, max_seq_len, hidden_features)
 
         value = self.out_embed(value)
@@ -178,10 +194,11 @@ def generate(model: nn.Module, length: int, prompt: str = "") -> str:
 
 
 model = Model(vocab_size=vocab_size, sequence_length=SEQUENCE_LENGTH, hidden_features=HIDDEN_FEATURES, nhead=NHEAD,
-              temperature=TEMPERATURE, char_to_ix=char_to_ix, ix_to_char=ix_to_char)
+              num_layers=NUM_LAYERS, temperature=TEMPERATURE, char_to_ix=char_to_ix, ix_to_char=ix_to_char)
 model.to(DEVICE)
 loss_func = nn.CrossEntropyLoss().to(DEVICE)
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA)
+# optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=LEARNING_BETA)
+optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=LEARNING_BETA[0])
 
 
 fig, ax = plt.subplots(1,1)
@@ -236,7 +253,7 @@ class Timer:
         return False
 
 plot_timer = Timer(interval_in_s=1)
-generate_timer = Timer(interval_in_s=5) # 30s
+generate_timer = Timer(interval_in_s=30) # 30s
 snapshot_timer = Timer(interval_in_s=60) # 60s
 
 for epoch_idx in range(NUM_EPOCHS):
@@ -264,7 +281,7 @@ for epoch_idx in range(NUM_EPOCHS):
 
 
         result = model.forward(data_input_slice)
-        target = F.one_hot(data_output_slice, num_classes=vocab_size).float()
+        target = F.one_hot(data_input_slice, num_classes=vocab_size).float()
         loss = loss_func(result.view(-1, vocab_size), target.view(-1, vocab_size))
 
         optimizer.zero_grad()
