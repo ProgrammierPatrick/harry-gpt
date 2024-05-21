@@ -6,9 +6,9 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Harry-GPT</title>
-  <script src="{{url_for('static', filename='htmx-1.9.12.js)}}"></script>
-  <script src="{{url_for('static', filename='htmx-sse-1.9.12.js)}}"></script>
-  <link rel="stylesheet" type="text/css" href="{{url_for('static', filename='style.css')}}" />
+  <script src="{{ url_for('static', filename='htmx-1.9.12.js') }}"></script>
+  <script src="{{ url_for('static', filename='htmx-sse-1.9.12.js') }}"></script>
+  <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 
 <body>
@@ -24,25 +24,19 @@
   </header>
 
   <main id="messages" hx-ext="sse" sse-connect="/stream">
-    <div class="response" sse-swap="gen" hx-swap="beforeend" hx-target=".response:last-of-type"></div>
-    <button id="continue" hx-post="/chat/continue">Continue</button>
+    <div sse-swap="token" hx-swap="beforeend" hx-target=".response:last-of-type"></div>
+    <div sse-swap="end"   hx-swap="beforeend" hx-target="#messages"></div>
   </main>
 
   <footer>
     <div class="footer-content">
-      <textarea id="chatprompt" placeholder="Enter Prompt here..."
+      <textarea id="chat-prompt" placeholder="Enter Prompt here..."
         hx-post="/chat"
-        hx-vals="js:{'msg': encodeURIComponent(document.getElementById('chatprompt').value)}"
+        hx-vals="js:{'prompt': encodeURIComponent(document.getElementById('chat-prompt').value)}"
         hx-trigger="click from:#send-btn, enter"
-        hx-on::before-request="
-          const req = document.createElement('div');
-          req.className = 'request';
-          req.innerText = this.value;
-          document.querySelector('#continue').before(req);
-          const res = document.createElement('div');
-          res.className = 'response';
-          document.querySelector('#continue').before(res);
-          this.value = '';"
+        hx-target="#messages" hx-swap="beforeend"
+        {# hx-swap-oob="delete:.continue-btn" #}
+        hx-on::before-request="this.value = ''"
         hx-on:keypress="
           const isMobile = window.matchMedia('(max-width: 800px)').matches;
           if (event.keyCode === 13 && !event.shiftKey && !isMobile) {

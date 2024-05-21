@@ -65,15 +65,15 @@ def generate_it(model: nn.Module, length: int, prompt: str = "") -> Iterator[str
         char, context = model.generate_step(context)
         yield char
 
-@app.route('/stream')
+@app.route("/stream")
 def sse_send_chat():
-    if not 'uuid' in session:
+    if not "uuid" in session:
         session_uuid = str(uuid.uuid4())
-        session['uuid'] = session_uuid
+        session["uuid"] = session_uuid
         print("generated uuid:", session_uuid)
         session.modified = True
     else:
-        session_uuid = session['uuid']
+        session_uuid = session["uuid"]
         print("keep old uuid:", session_uuid)
 
     @copy_current_request_context
@@ -83,55 +83,58 @@ def sse_send_chat():
                 if uuid in active_generators:
                     text = next(active_generators[uuid])
                     active_text[uuid] += text
-                    yield f"event: gen\ndata: <span>{text}</span>\n\n"
+                    yield f"event: token\ndata: <span>{text}</span>\n\n"
                 else:
                     yield "event: keeapalive\ndata: \n\n"
                     time.sleep(0.1)
             except StopIteration:
-                yield "event: end of iterator\ndata: \n\n"
+                continue_btn = "<button id='continue-btn' hx-post='/chat/continue' hx-swap='delete'>Continue</button>"
+                yield f"event: end\ndata: {continue_btn}\n\n"
                 active_generators.pop(uuid)
                 time.sleep(0.1)
-    return Response(outer_gen(session_uuid), mimetype='text/event-stream')
+    return Response(outer_gen(session_uuid), mimetype="text/event-stream")
 
 def create_chat_generator(prompt: str) -> Iterator[str]:
     print("Execute", prompt)
     generator = generate_it(model=model, length=1000, prompt=prompt)
 
-    if not 'uuid' in session:
+    if not "uuid" in session:
         session_uuid = str(uuid.uuid4())
-        session['uuid'] = session_uuid
+        session["uuid"] = session_uuid
         print("generated uuid in ajax request:", session_uuid)
-    session_uuid = session['uuid']
+    session_uuid = session["uuid"]
     active_text[session_uuid] = ""
     active_generators[session_uuid] = generator
     print("added generator for uuid:", session_uuid)
 
-@app.route('/chat', methods = ['POST'])
+@app.route("/chat", methods = ["POST"])
 def chat_receive_message():
-    msg = request.form["msg"]
-    msg = urllib.parse.unquote(msg)
-    create_chat_generator(msg)
-    return '', 204 # No content
+    prompt = request.form["prompt"]
+    prompt = urllib.parse.unquote(prompt)
+    create_chat_generator(prompt)
+    return f"<div class='request'>{prompt}</div>\
+        <div class='response'></div>\
+        <button id='continue-btn' hx-swap-oob='delete'></button>"
 
-@app.route('/chat/continue', methods = ['POST'])
+@app.route("/chat/continue", methods = ["POST"])
 def chat_continue():
-    create_chat_generator(active_text[session['uuid']])
-    return '', 204 # No content
+    create_chat_generator(active_text[session["uuid"]])
+    return ""
 
 @app.route("/img/<filename>.png")
 def img_static(filename):
     return send_from_directory(f"{app.root_path}/models/", f"{filename}.png")
 
-@app.route('/')
+@app.route("/")
 def index():
     session_uuid = str(uuid.uuid4())
-    session['uuid'] = session_uuid
+    session["uuid"] = session_uuid
 
     model_data = {}
     for value in models_json_data.values():
         model_data[value["name"]] = value["loss"]
 
-    return render_template('index.html.j2',
+    return render_template("index.html.j2",
         models_json=json.dumps(models_json_data),
         model_data=model_data,
         default_model_name=default_model_name)
