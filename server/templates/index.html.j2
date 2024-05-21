@@ -6,7 +6,8 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Harry-GPT</title>
-  <script src="{{url_for('static', filename='jquery-3.6.4.min.js')}}"></script>
+  <script src="{{url_for('static', filename='htmx-1.9.12.js)}}"></script>
+  <script src="{{url_for('static', filename='htmx-sse-1.9.12.js)}}"></script>
   <link rel="stylesheet" type="text/css" href="{{url_for('static', filename='style.css')}}" />
 </head>
 
@@ -15,90 +16,42 @@
     <h1>Harry-GPT</h1>
     <form>
       <label>Model:</label>
-      <select id="select-model"></select>
-      <button>Info</button>
+      <select id="select-model" disabled>
+        <option value="{{ default_model_name }}" selected>{{ default_model_name }}</option>
+      </select>
+      <button disabled>Info</button>
     </form>
   </header>
 
-  <main id="messages">
-    <button id="continue-generating" onclick="continue_generating()">Continue generating</button>
+  <main id="messages" hx-ext="sse" sse-connect="/stream">
+    <div class="response" sse-swap="gen" hx-swap="beforeend" hx-target=".response:last-of-type"></div>
+    <button id="continue" hx-post="/chat/continue">Continue</button>
   </main>
 
   <footer>
     <div class="footer-content">
-      <textarea id="chat-prompt" onkeypress="keyCallback()" placeholder="Enter Prompt here..."></textarea>
-      <button type="button" onclick="send_chat()">Send</button>
+      <textarea id="chatprompt" placeholder="Enter Prompt here..."
+        hx-post="/chat"
+        hx-vals="js:{'msg': encodeURIComponent(document.getElementById('chatprompt').value)}"
+        hx-trigger="click from:#send-btn, enter"
+        hx-on::before-request="
+          const req = document.createElement('div');
+          req.className = 'request';
+          req.innerText = this.value;
+          document.querySelector('#continue').before(req);
+          const res = document.createElement('div');
+          res.className = 'response';
+          document.querySelector('#continue').before(res);
+          this.value = '';"
+        hx-on:keypress="
+          const isMobile = window.matchMedia('(max-width: 800px)').matches;
+          if (event.keyCode === 13 && !event.shiftKey && !isMobile) {
+            htmx.trigger(this, 'enter'); event.preventDefault();
+          }"
+      ></textarea>
+      <button id="send-btn">Send</button>
     </div>
   </footer>
-
-  <script>
-    function send_prompt(prompt, showPrompt) {
-        // create chat message elements
-        if (showPrompt) {
-            const new_request = $('<div class="request"/>');
-            new_request.text(prompt);
-            $('#continue-generating').before(new_request);
-        }
-        const new_response = $('<div class="response"/>');
-        $('#continue-generating').before(new_response);
-
-        // open SSE stream
-        var source = new EventSource('/sse/send_chat');
-        source.onmessage = function (event) {
-            $('.response:last').append(event.data);
-            $('.response:last')[0].scrollIntoView();
-        };
-
-        // send chat message
-        var encoded_msg = encodeURIComponent(prompt);
-        $.ajax({
-            type: 'POST',
-            url: '/ajax/send_chat',
-            data: { msg: encoded_msg },
-            error: function (xhr, status, error) {
-                console.log(xhr, status, error);
-            },
-            success: function (response) {
-
-            }
-        });
-    }
-
-    function send_chat() {
-        // read chat box
-        const msg = $('#chat-prompt').val();
-        $('#chat-prompt').val('');
-
-        send_prompt(msg, true);
-    }
-
-    function continue_generating() {
-        // read last response
-        const msg = $('.response:last').text();
-        console.log("read value: ", msg);
-        send_prompt(msg, false);
-    }
-
-    function init_settings() {
-        var select = $('#select-model');
-        data = {{ models_json }};
-        for (const model_name in data) {
-            const model_data = data[model_name];
-            select.append($('<option/>').val(model_data.name).text(model_data.name));
-        }
-    }
-    function update_settings() { }
-
-    function keyCallback() {
-      let isMobile = window.matchMedia("(max-width: 800px)").matches;
-      if (!isMobile && event.keyCode === 13 && !event.shiftKey) {
-        send_chat();
-        event.preventDefault();
-      }
-    }
-
-    init_settings();
-  </script>
 </body>
 
 </html>

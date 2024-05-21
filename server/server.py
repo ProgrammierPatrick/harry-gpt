@@ -45,20 +45,27 @@ for model_filename in os.listdir("models"):
     }
     models[model_name] = {"model": model, "layers": layers}
 
-model = models["gru-res-6-256-de"]["model"]
+default_model_name = "gru-res-6-256-de"
+model = models[default_model_name]["model"]
 
 active_generators = {}
+active_text = {}
 
 def generate_it(model: nn.Module, length: int, prompt: str = "") -> Iterator[str]:
     if prompt == "":
         prompt = model.ix_to_char[torch.randint(low=0, high=model.vocab_size, size=(1,)).item()]
+    
+    # TODO: Convert to ascii. We should find a better way to handle unicode chars
+    prompt = prompt.encode("ascii", "replace").decode("utf-8", "replace")
+    prompt = prompt.replace("\ufffd", "")
+
     char, context = model.generate_start(prompt)
     yield char
     for _ in range(length - 1):
         char, context = model.generate_step(context)
         yield char
 
-@app.route('/sse/send_chat')
+@app.route('/stream')
 def sse_send_chat():
     if not 'uuid' in session:
         session_uuid = str(uuid.uuid4())
@@ -71,34 +78,45 @@ def sse_send_chat():
 
     @copy_current_request_context
     def outer_gen(uuid):
-        try:
-            while True:
+        while True:
+            try:
                 if uuid in active_generators:
-                    yield f"data: {next(active_generators[uuid])}\n\n"
+                    text = next(active_generators[uuid])
+                    active_text[uuid] += text
+                    yield f"event: gen\ndata: <span>{text}</span>\n\n"
                 else:
+                    yield "event: keeapalive\ndata: \n\n"
                     time.sleep(0.1)
-        except StopIteration:
-            pass
-        print("Generation finished.")
+            except StopIteration:
+                yield "event: end of iterator\ndata: \n\n"
+                active_generators.pop(uuid)
+                time.sleep(0.1)
     return Response(outer_gen(session_uuid), mimetype='text/event-stream')
 
-@app.route('/ajax/send_chat', methods = ['POST'])
-def ajax_send_chat():
-    msg = request.form["msg"]
-    msg = urllib.parse.unquote(msg)
-    print(f"Execute {msg}")
-    generator = generate_it(model=model, length=1000, prompt=msg)
+def create_chat_generator(prompt: str) -> Iterator[str]:
+    print("Execute", prompt)
+    generator = generate_it(model=model, length=1000, prompt=prompt)
 
     if not 'uuid' in session:
         session_uuid = str(uuid.uuid4())
         session['uuid'] = session_uuid
         print("generated uuid in ajax request:", session_uuid)
     session_uuid = session['uuid']
+    active_text[session_uuid] = ""
     active_generators[session_uuid] = generator
-
     print("added generator for uuid:", session_uuid)
 
-    return '', 204
+@app.route('/chat', methods = ['POST'])
+def chat_receive_message():
+    msg = request.form["msg"]
+    msg = urllib.parse.unquote(msg)
+    create_chat_generator(msg)
+    return '', 204 # No content
+
+@app.route('/chat/continue', methods = ['POST'])
+def chat_continue():
+    create_chat_generator(active_text[session['uuid']])
+    return '', 204 # No content
 
 @app.route("/img/<filename>.png")
 def img_static(filename):
@@ -113,7 +131,10 @@ def index():
     for value in models_json_data.values():
         model_data[value["name"]] = value["loss"]
 
-    return render_template('index.html.j2', models_json=json.dumps(models_json_data), model_data=model_data)
+    return render_template('index.html.j2',
+        models_json=json.dumps(models_json_data),
+        model_data=model_data,
+        default_model_name=default_model_name)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)
